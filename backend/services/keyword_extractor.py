@@ -31,7 +31,7 @@ def extract_keywords(subject: str) -> list[str]:
 
     keywords = [
         word for word in tokens
-        if word.isalnum() and word not in stop_words and len(word) > 2
+        if word.isalnum() and word not in stop_words
     ]
 
     seen = set()
