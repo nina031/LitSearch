@@ -1,3 +1,4 @@
+import logging
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -5,6 +6,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from models.research import PaperChunk
 from config import LLM_MODEL, LLM_TEMPERATURE, EMBEDDING_MODEL
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def query_rag(question: str, db: Session, k: int = 5) -> dict:
@@ -23,8 +27,12 @@ def query_rag(question: str, db: Session, k: int = 5) -> dict:
         }
     """
 
+    logger.info(f"[RAG] Starting query_rag for question: {question[:50]}...")
+
+    logger.info(f"[RAG] Creating embeddings for question")
     embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
     question_vector = embeddings.embed_query(question)
+    logger.info(f"[RAG] Question embedding created")
 
     query_text = text("""
         SELECT
@@ -39,6 +47,7 @@ def query_rag(question: str, db: Session, k: int = 5) -> dict:
         LIMIT :k
     """)
 
+    logger.info(f"[RAG] Executing similarity search in database")
     results = db.execute(
         query_text,
         {
@@ -46,6 +55,7 @@ def query_rag(question: str, db: Session, k: int = 5) -> dict:
             "k": k
         }
     ).fetchall()
+    logger.info(f"[RAG] Found {len(results)} similar chunks")
 
     if not results:
         return {
@@ -85,6 +95,7 @@ def query_rag(question: str, db: Session, k: int = 5) -> dict:
 
     context = "\n\n".join(context_parts)
 
+    logger.info(f"[RAG] Generating answer with LLM ({LLM_MODEL})")
     llm = ChatOpenAI(model=LLM_MODEL, temperature=LLM_TEMPERATURE)
 
     prompt = ChatPromptTemplate.from_messages([
@@ -103,6 +114,8 @@ Context:
         "context": context,
         "question": question
     })
+
+    logger.info(f"[RAG] Answer generated successfully")
 
     return {
         "answer": answer,

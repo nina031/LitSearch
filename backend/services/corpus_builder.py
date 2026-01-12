@@ -1,6 +1,7 @@
 import arxiv
 import requests
 import io
+import logging
 from pypdf import PdfReader
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -10,6 +11,9 @@ from sqlalchemy import distinct
 from models.research import EnrichmentJob, PaperChunk
 from config import MAX_PAPERS, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL
 from typing import Callable
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def get_existing_article_ids(db: Session) -> set[str]:
@@ -34,12 +38,17 @@ def build_corpus(
         progress_callback: Optional callback(status, current, total)
     """
 
+    logger.info(f"[CORPUS] Starting build_corpus for job {job_id}")
+    logger.info(f"[CORPUS] Keywords: {keywords}")
+
     if progress_callback:
         progress_callback("fetching", 0, MAX_PAPERS)
 
     existing_ids = get_existing_article_ids(db)
+    logger.info(f"[CORPUS] Found {len(existing_ids)} existing articles in database")
 
     query = " AND ".join(keywords)
+    logger.info(f"[CORPUS] ArXiv query: {query}")
     search = arxiv.Search(
         query=query,
         max_results=MAX_PAPERS,
@@ -69,10 +78,14 @@ def build_corpus(
             progress_callback("fetching", i, MAX_PAPERS)
 
     if skipped > 0:
-        print(f"Skipped {skipped} articles already in database")
+        logger.info(f"[CORPUS] Skipped {skipped} articles already in database")
+
+    logger.info(f"[CORPUS] Fetched {len(papers)} new papers from ArXiv")
 
     if progress_callback:
         progress_callback("parsing", 0, len(papers))
+
+    logger.info(f"[CORPUS] Starting PDF parsing for {len(papers)} papers")
 
     for i, paper in enumerate(papers):
         text = _parse_pdf(paper['pdf_url'])
@@ -85,8 +98,12 @@ def build_corpus(
         if progress_callback and i % 10 == 0:
             progress_callback("parsing", i, len(papers))
 
+    logger.info(f"[CORPUS] PDF parsing complete")
+
     if progress_callback:
         progress_callback("chunking", 0, len(papers))
+
+    logger.info(f"[CORPUS] Starting chunking for {len(papers)} papers")
 
     all_chunks = []
     for i, paper in enumerate(papers):
@@ -96,8 +113,12 @@ def build_corpus(
         if progress_callback and i % 20 == 0:
             progress_callback("chunking", i, len(papers))
 
+    logger.info(f"[CORPUS] Chunking complete: {len(all_chunks)} total chunks")
+
     if progress_callback:
         progress_callback("embedding", 0, len(all_chunks))
+
+    logger.info(f"[CORPUS] Starting embedding for {len(all_chunks)} chunks")
 
     embeddings_model = OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
@@ -128,9 +149,13 @@ def build_corpus(
         if progress_callback:
             progress_callback("embedding", min(i + batch_size, len(all_chunks)), len(all_chunks))
 
+    logger.info(f"[CORPUS] Embedding complete, all chunks stored in database")
+
     job = db.query(EnrichmentJob).filter(EnrichmentJob.id == job_id).first()
     job.status = "ready"
     db.commit()
+
+    logger.info(f"[CORPUS] Job {job_id} completed successfully")
 
 
 def _parse_pdf(pdf_url: str) -> str:

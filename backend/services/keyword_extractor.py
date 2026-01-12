@@ -1,6 +1,10 @@
+import logging
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 try:
     nltk.data.find('corpora/stopwords')
@@ -20,6 +24,7 @@ def extract_keywords(subject: str) -> list[str]:
     Returns:
         List of keywords for ArXiv search
     """
+    logger.info(f"[KEYWORDS] Extracting keywords from: {subject}")
     text = subject.lower()
     tokens = word_tokenize(text)
     stop_words = set(stopwords.words('english'))
@@ -36,4 +41,5 @@ def extract_keywords(subject: str) -> list[str]:
             seen.add(kw)
             unique_keywords.append(kw)
 
+    logger.info(f"[KEYWORDS] Extracted {len(unique_keywords)} keywords: {unique_keywords}")
     return unique_keywords
