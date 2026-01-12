@@ -163,8 +163,10 @@ def _parse_pdf(pdf_url: str) -> str:
     try:
         response = requests.get(pdf_url, timeout=30)
         pdf = PdfReader(io.BytesIO(response.content))
-        text = "".join(page.extract_text() for page in pdf.pages)
+        text = "".join(page.extract_text() or "" for page in pdf.pages)
         text = text.replace('\x00', '')
+        # Remove invalid unicode surrogate characters
+        text = text.encode('utf-8', errors='surrogatepass').decode('utf-8', errors='replace')
         return text if len(text) > 500 else None
     except Exception as e:
         print(f"Error parsing PDF {pdf_url}: {e}")
