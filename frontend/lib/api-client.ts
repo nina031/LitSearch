@@ -54,13 +54,13 @@ export const apiClient = {
     return response.json();
   },
 
-  async chat(question: string): Promise<ChatResponse> {
+  async chat(question: string, chat_history: { role: string; content: string }[]): Promise<ChatResponse> {
     const response = await fetch(`${API_BASE_URL}/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, chat_history }),
     });
 
     if (!response.ok) {

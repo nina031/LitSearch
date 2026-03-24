@@ -13,6 +13,15 @@ export default function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
+
+  const toggleSource = (key: string) => {
+    setExpandedSources(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,7 +37,11 @@ export default function ChatInterface() {
     setLoading(true);
 
     try {
-      const response = await apiClient.chat(input);
+      const chat_history = messages.map((m) => ({
+        role: m.role === 'user' ? 'human' : 'ai',
+        content: m.content,
+      }));
+      const response = await apiClient.chat(input, chat_history);
 
       const assistantMessage: Message = {
         role: 'assistant',
@@ -99,9 +112,6 @@ export default function ChatInterface() {
                                   }`}>
                                     {source.section}
                                   </span>
-                                  <span className="text-xs text-gray-500">
-                                    {Math.round(source.score * 100)}% pertinent
-                                  </span>
                                 </div>
                                 <p className="text-sm font-medium text-gray-900 truncate">
                                   {source.title}
@@ -119,9 +129,23 @@ export default function ChatInterface() {
                                 </svg>
                               </a>
                             </div>
-                            <p className="mt-2 text-xs text-gray-600 italic leading-relaxed">
-                              "{source.excerpt}"
-                            </p>
+                            {(() => {
+                              const key = `${index}-${idx}`;
+                              const isExpanded = expandedSources.has(key);
+                              return (
+                                <div className="mt-2">
+                                  <p className={`text-xs text-gray-600 italic leading-relaxed ${isExpanded ? '' : 'line-clamp-3'}`}>
+                                    "{source.excerpt}"
+                                  </p>
+                                  <button
+                                    onClick={() => toggleSource(key)}
+                                    className="mt-1 text-xs text-blue-600 hover:underline"
+                                  >
+                                    {isExpanded ? 'Voir moins' : 'Voir plus'}
+                                  </button>
+                                </div>
+                              );
+                            })()}
                           </div>
                         ))}
                       </div>

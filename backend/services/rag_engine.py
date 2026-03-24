@@ -1,123 +1,121 @@
+import re
 import logging
+
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_postgres import PGVector
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage, trim_messages, BaseMessage
+import tiktoken
 from langchain_core.output_parsers import StrOutputParser
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from models.research import PaperChunk
-from config import LLM_MODEL, LLM_TEMPERATURE, EMBEDDING_MODEL
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+
+from config import LLM_MODEL, LLM_TEMPERATURE, EMBEDDING_MODEL, DATABASE_URL, COLLECTION_NAME
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def query_rag(question: str, db: Session, k: int = 5) -> dict:
-    """
-    Query the RAG system with semantic search + LLM generation.
-
-    Args:
-        question: User question
-        db: Database session
-        k: Number of chunks to retrieve
-
-    Returns:
-        {
-            "answer": str,
-            "sources": list[dict]
-        }
-    """
-
-    logger.info(f"[RAG] Starting query_rag for question: {question[:50]}...")
-
-    logger.info(f"[RAG] Creating embeddings for question")
+def _build_rag_chain(k: int = 5):
     embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
-    question_vector = embeddings.embed_query(question)
-    logger.info(f"[RAG] Question embedding created")
-
-    query_text = text("""
-        SELECT
-            id,
-            content,
-            article_id,
-            path,
-            paper_metadata,
-            1 - (embedding <=> :question_vector) AS similarity
-        FROM papers_chunks
-        ORDER BY embedding <=> :question_vector
-        LIMIT :k
-    """)
-
-    logger.info(f"[RAG] Executing similarity search in database")
-    results = db.execute(
-        query_text,
-        {
-            "question_vector": str(question_vector),
-            "k": k
-        }
-    ).fetchall()
-    logger.info(f"[RAG] Found {len(results)} similar chunks")
-
-    if not results:
-        return {
-            "answer": "No relevant information found in the corpus.",
-            "sources": []
-        }
-
-    context_parts = []
-    sources = []
-
-    for row in results:
-        content = row.content
-        article_id = row.article_id
-        metadata = row.paper_metadata
-        similarity = row.similarity
-
-        context_parts.append(f"[arXiv:{article_id}]: {content}")
-
-        excerpt = content[:200].strip()
-        if len(content) > 200:
-            excerpt += "..."
-
-        section_labels = {
-            "title_abstract": "Abstract",
-            "body": "Body",
-        }
-        section = section_labels.get(metadata.get('section', 'body'), 'Body')
-
-        sources.append({
-            "arxiv_id": article_id,
-            "title": metadata['title'],
-            "section": section,
-            "excerpt": excerpt,
-            "url": f"https://arxiv.org/abs/{article_id}",
-            "score": round(similarity, 3)
-        })
-
-    context = "\n\n".join(context_parts)
-
-    logger.info(f"[RAG] Generating answer with LLM ({LLM_MODEL})")
     llm = ChatOpenAI(model=LLM_MODEL, temperature=LLM_TEMPERATURE)
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a helpful AI research assistant. Use the context to answer the question.
-Always cite sources using the format [arXiv:ID].
-If the context doesn't contain the answer, say so.
+    vector_store = PGVector(
+        embeddings=embeddings,
+        collection_name=COLLECTION_NAME,
+        connection=DATABASE_URL,
+    )
+    retriever = vector_store.as_retriever(search_kwargs={"k": k})
 
-Context:
+    contextualize_prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "Your ONLY task is to rewrite the user's latest question as a fully self-contained question. "
+         "Use the chat history solely to add missing context (subjects, concepts, entities) to the question. "
+         "The output must always be a question — never an answer, never a comment on available information. "
+         "Never use vague references — always replace them with the actual subject from the conversation.\n\n"
+         "Examples:\n"
+         "- History: [user: 'what is CRISPR?'] / Question: 'who invented it?' → 'Who invented CRISPR?'\n"
+         "- History: [user: 'explain transformer architecture'] / Question: 'what are its limitations?' → 'What are the limitations of the transformer architecture?'\n"
+         "- History: [user: 'what is dark matter?'] / Question: 'how do we detect it?' → 'How do we detect dark matter?'\n\n"
+         "Return ONLY the rewritten question."),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    contextualize_chain = contextualize_prompt | llm | StrOutputParser()
+
+    def get_docs(input: dict):
+        question = input["input"]
+        if input.get("chat_history"):
+            question = contextualize_chain.invoke(input)
+        logger.info(f"[RAG] Reformulated question: {question}")
+        return retriever.invoke(question)
+
+    answer_prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         """You are a research assistant. Your ONLY source of information is the context provided below.
+Do NOT use any knowledge from your training data.
+Only cite sources from the context using [arXiv:ID]. Never cite sources outside the context.
+If the answer is not explicitly stated in the context, say "I cannot find this information in the provided documents."
+Never paraphrase or infer beyond what is written in the context.
+
 {context}"""),
-        ("human", "{question}")
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
     ])
 
-    chain = prompt | llm | StrOutputParser()
+    def generate_answer(x: dict) -> str:
+        context_str = "\n\n".join(
+            f"[arXiv:{doc.metadata['arxiv_id']}]: {doc.page_content}"
+            for doc in x["context"]
+        )
+        return (answer_prompt | llm | StrOutputParser()).invoke({
+            "input": x["input"],
+            "chat_history": x["chat_history"],
+            "context": context_str,
+        })
 
-    answer = chain.invoke({
-        "context": context,
-        "question": question
-    })
+    return RunnablePassthrough.assign(
+        context=RunnableLambda(get_docs)
+    ).assign(
+        answer=RunnableLambda(generate_answer)
+    )
 
-    logger.info(f"[RAG] Answer generated successfully")
 
-    return {
-        "answer": answer,
-        "sources": sources
-    }
+def query_rag(question: str, chat_history: list[dict], k: int = 5) -> dict:
+    logger.info(f"[RAG] Starting query for: {question[:50]}...")
+
+    llm = ChatOpenAI(model=LLM_MODEL, temperature=LLM_TEMPERATURE)
+
+    messages = [
+        HumanMessage(content=m["content"]) if m["role"] == "human"
+        else AIMessage(content=m["content"])
+        for m in chat_history
+    ]
+
+    messages = trim_messages(
+        messages,
+        max_tokens=4000,
+        token_counter=llm,
+        strategy="last",
+    )
+
+    chain = _build_rag_chain(k)
+    result = chain.invoke({"input": question, "chat_history": messages})
+
+    cited_ids = set(re.findall(r'\[arXiv:([\w.]+)\]', result["answer"]))
+
+    section_labels = {"title_abstract": "Abstract", "body": "Body"}
+    sources = []
+    for doc in result["context"]:
+        meta = doc.metadata
+        if meta["arxiv_id"] not in cited_ids:
+            continue
+        sources.append({
+            "arxiv_id": meta["arxiv_id"],
+            "title": meta["title"],
+            "section": section_labels.get(meta.get("section", "body"), "Body"),
+            "excerpt": doc.page_content,
+            "url": f"https://arxiv.org/abs/{meta['arxiv_id']}",
+        })
+
+    logger.info("[RAG] Answer generated successfully")
+    return {"answer": result["answer"], "sources": sources}
