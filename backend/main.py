@@ -1,9 +1,9 @@
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
-from models.research import Base, EnrichmentJob, PaperChunk
+from models.research import Base, EnrichmentJob
 from services.keyword_extractor import extract_keywords
 from services.corpus_builder import build_corpus
 from services.rag_engine import query_rag
@@ -54,6 +54,7 @@ class StatusResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
+    chat_history: list[dict] = []
 
 
 class ChatResponse(BaseModel):
@@ -65,17 +66,7 @@ def build_corpus_task(job_id: str, keywords: list[str]):
     """Background task to build corpus"""
     db = SessionLocal()
     try:
-        def update_progress(status: str, current: int, total: int):
-            job = db.query(EnrichmentJob).filter(EnrichmentJob.id == job_id).first()
-            job.status = status
-            job.progress = {
-                "step": status,
-                "current": current,
-                "total": total
-            }
-            db.commit()
-
-        build_corpus(job_id, keywords, db, progress_callback=update_progress)
+        build_corpus(job_id, keywords, db)
 
     except Exception as e:
         db.rollback()
@@ -96,7 +87,7 @@ def build_corpus_task(job_id: str, keywords: list[str]):
 async def enrich_corpus(
     request: EnrichRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Enrich the global corpus with papers related to a subject.
@@ -109,17 +100,14 @@ async def enrich_corpus(
         subject=request.subject,
         keywords=keywords,
         status="extracting",
-        progress={"step": "extracting", "current": 0, "total": 0}
+        progress={"step": "extracting", "current": 0, "total": 0},
     )
     db.add(job)
     db.commit()
 
     background_tasks.add_task(build_corpus_task, job.id, keywords)
 
-    return EnrichResponse(
-        job_id=job.id,
-        keywords=keywords
-    )
+    return EnrichResponse(job_id=job.id, keywords=keywords)
 
 
 @app.get("/corpus/status", response_model=StatusResponse)
@@ -130,33 +118,17 @@ async def get_corpus_status(db: Session = Depends(get_db)):
     if not job:
         return StatusResponse(status=None, progress=None)
 
-    return StatusResponse(
-        status=job.status,
-        progress=job.progress
-    )
+    return StatusResponse(status=job.status, progress=job.progress)
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(
-    request: ChatRequest,
-    db: Session = Depends(get_db)
-):
+async def chat(request: ChatRequest):
     """
     Ask a question to the RAG system (queries the global corpus).
     """
-    chunk_count = db.query(PaperChunk).count()
-    if chunk_count == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Corpus is empty. Please add papers first."
-        )
+    result = query_rag(request.question, request.chat_history)
 
-    result = query_rag(request.question, db)
-
-    return ChatResponse(
-        answer=result["answer"],
-        sources=result["sources"]
-    )
+    return ChatResponse(answer=result["answer"], sources=result["sources"])
 
 
 @app.get("/")
@@ -167,5 +139,6 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     import os
+
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
